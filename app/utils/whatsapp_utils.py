@@ -6,6 +6,13 @@ import re
 from google import genai
 import os
 import mimetypes
+import tempfile
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib import colors
+import io
 
 def log_http_response(response):
     logging.info(f"Status: {response.status_code}")
@@ -25,6 +32,27 @@ def get_text_message_input(recipient, text):
     )
 
 
+def get_document_message_input(recipient, document_id, caption=None):
+    """
+    Create a document message payload for WhatsApp API
+    """
+    message = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": recipient,
+        "type": "document",
+        "document": {
+            "id": document_id
+        }
+    }
+    
+    # Add caption if provided
+    if caption:
+        message["document"]["caption"] = caption
+        
+    return json.dumps(message)
+
+
 def translate_to_english(text):
     try:        
         if not current_app.config.get("GEMINI_API_KEY"):
@@ -34,7 +62,6 @@ def translate_to_english(text):
             api_key=os.environ.get("GEMINI_API_KEY"),
         )
     
-        semiprompt = f"Translate the following text to English: '{text}' and only give the best translation, no other useless text"
         prompt = '''
 Translate the following text to English and convert it into a medical report. Format with bold section headers (**Section:**) and proper structure following standard hospital format. Include: Patient Details, Chief Complaint, History, Examination, Assessment, and Plan. Use simple formatting that works in WhatsApp (bold, bullet points).
 
@@ -45,7 +72,6 @@ Text to translate: '''+text
         logging.info("response: ",response)
         return response.text
 
-    
     except Exception as e:
         error_msg = f"Translation error: {str(e)}"
         logging.error(error_msg)
@@ -76,6 +102,12 @@ def send_message(data):
         # Raises an HTTPError if the HTTP request returned an unsuccessful status code
         response.raise_for_status()  
         logging.info("Request was successful")
+        
+        # Process the response as normal
+        logging.info("Logging HTTP response details")
+        log_http_response(response)
+        logging.info("Message sent successfully")
+        return response
     except requests.Timeout:
         error_msg = "Timeout occurred while sending message"
         logging.error(error_msg)
@@ -91,12 +123,6 @@ def send_message(data):
         logging.error(error_msg)
         logging.exception("Full exception details:")
         return jsonify({"status": "error", "message": "Failed to send message"}), 500
-    else:
-        # Process the response as normal
-        logging.info("Logging HTTP response details")
-        log_http_response(response)
-        logging.info("Message sent successfully")
-        return response
 
 
 def process_text_for_whatsapp(text):
@@ -143,67 +169,103 @@ def download_media(url):
     return response.content
 
 
-def transcribe_audio(audio_data, mime_type=None):
+def generate_pdf_from_text(text):
     """
-    Transcribes audio data (bytes) to text, then translates it to English using Gemini,
-    relying *only* on Gemini.  Handles raw bytes directly.
-
-    Args:
-        audio_data:  The audio data as bytes.
-        mime_type: (optional) The MIME type of the audio data. If not provided,
-                   the function will attempt to guess it from the audio data.
-                   It's VERY highly recommended to provide the mime_type for reliability.
-
-    Returns:
-        Translated text in English, or an error message.
+    Generate a PDF document from the given text
+    Returns the PDF file as bytes
     """
+    logging.info("Generating PDF from text")
+    buffer = io.BytesIO()
+    
+    # Create the PDF document
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
+    
+    # Create custom styles
+    title_style = ParagraphStyle(
+        'Title',
+        parent=styles['Heading1'],
+        fontSize=16,
+        alignment=TA_CENTER,
+        spaceAfter=12
+    )
+    
+    header_style = ParagraphStyle(
+        'Header',
+        parent=styles['Heading2'],
+        fontSize=12,
+        textColor=colors.blue,
+        spaceAfter=6
+    )
+    
+    normal_style = styles['Normal']
+    
+    # Process the markdown-like text
+    # Convert **Text** to bold in PDF
+    elements = []
+    
+    # Add the title
+    elements.append(Paragraph("Medical Report", title_style))
+    elements.append(Spacer(1, 12))
+    
+    # Process each line of the text
+    lines = text.split('\n')
+    for line in lines:
+        # Check if line is a header (has asterisks)
+        if re.search(r'\*\*(.*?)\*\*', line):
+            # Extract header text and convert to PDF format
+            header_text = re.sub(r'\*\*(.*?)\*\*', r'\1', line)
+            elements.append(Paragraph(header_text, header_style))
+        else:
+            # Regular text
+            if line.strip():  # Skip empty lines
+                elements.append(Paragraph(line, normal_style))
+                elements.append(Spacer(1, 6))
+    
+    # Build the PDF
+    doc.build(elements)
+    
+    # Get the PDF data
+    pdf_data = buffer.getvalue()
+    buffer.close()
+    
+    return pdf_data
+
+
+def upload_media_to_whatsapp(file_data, file_type="application/pdf", file_name="medical_report.pdf"):
+    """
+    Upload media to WhatsApp servers and get the media ID
+    """
+    logging.info(f"Uploading {file_type} file to WhatsApp Media API")
+    
+    url = f"https://graph.facebook.com/{current_app.config['VERSION']}/{current_app.config['PHONE_NUMBER_ID']}/media"
+    
+    headers = {
+        "Authorization": f"Bearer {current_app.config['ACCESS_TOKEN']}",
+    }
+    
+    files = {
+        'file': (file_name, file_data, file_type)
+    }
+    
+    # Additional form data
+    data = {
+        'messaging_product': 'whatsapp',
+        'type': file_type
+    }
+    
     try:
-        # 1.  MIME Type Handling
-        if not mime_type:
-            # Attempt to guess MIME type if not provided.  This is unreliable!
-            try:
-              mime_type = mimetypes.guess_type(None, strict=False)[0]  # Pass None to guess from content, strict=False
-            except:
-              mime_type = None # handle the exception, this happens on systems where python can't guess
-            if not mime_type:
-                return "Error: Cannot determine MIME type from audio data. Please provide the 'mime_type' argument."
-            logging.warning(f"Guessed MIME type: {mime_type}.  It's recommended to provide this explicitly!")
-        logging.info(f"Using MIME type: {mime_type}")
-
-        # 2. Gemini Initialization
-
-        if not current_app.config.get("GEMINI_API_KEY") and not os.environ.get("GEMINI_API_KEY"):
-            return "Translation failed: Gemini API key is not configured."
-
-        gemini_api_key = current_app.config.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
-
-        model = genai.GenerativeModel(model_name="gemini-1.5-pro-latest",
-            api_key=gemini_api_key
-        ) # or use "gemini-1.5-pro-latest"
-        # 3. Gemini Prompt and Request
-
-        prompt = "Transcribe the audio and then translate the transcription to English. Give only the final English translation."  # Direct instruction to transcribe and translate
-
-        contents = [
-            prompt,
-            {
-                "mime_type": mime_type,  # Set the correct MIME type for the audio
-                "data": audio_data  # Pass the bytes directly
-            }
-        ]
-
-        response = model.generate_content(
-            contents = contents,
-            stream = False  # For simplicity, disable streaming
-        )
-        logging.info(f"Gemini API response: {response.text}")
-
-        return response.text  # This *should* be the English translation
-
+        response = requests.post(url, headers=headers, files=files, data=data)
+        response.raise_for_status()
+        
+        media_id = response.json().get('id')
+        logging.info(f"Media uploaded successfully, ID: {media_id}")
+        return media_id
     except Exception as e:
-        error_msg = f"Gemini error: {str(e)}"
-        logging.error(error_msg)
-        return f"Sorry, I couldn't process your audio using Gemini. Error: {str(e)}"
+        logging.error(f"Error uploading media: {str(e)}")
+        if hasattr(e, 'response') and e.response:
+            logging.error(f"Response: {e.response.text}")
+        raise
 
 
 def process_whatsapp_message(body):
@@ -220,8 +282,9 @@ def process_whatsapp_message(body):
         message_type = message.get("type")
         logging.info(f"Message type: {message_type}")
 
-        # Initialize response text
-        response = ""
+        # Send acknowledgment message
+        ack_data = get_text_message_input(wa_id, "Processing your request. Please wait...")
+        send_message(ack_data)
 
         if message_type == "text":
             message_body = message["text"]["body"]
@@ -229,12 +292,30 @@ def process_whatsapp_message(body):
 
             if message_body.strip().lower() == "hi":
                 logging.info("Special case: 'hi' detected")
-                response = "Hi, this is Sehat Saarthi"
+                response_data = get_text_message_input(wa_id, "Hi, this is Sehat Saarthi. How can I help you today?")
+                return send_message(response_data)
             else:
                 # Translate to English
                 logging.info("Translating text message to English")
                 translated_text = translate_to_english(message_body)
-                response = f"{translated_text}"
+
+                
+                # Generate PDF from the translated text
+                            # After generating the PDF from translated text
+                pdf_data = generate_pdf_from_text(translated_text)
+                            
+                # Create personalized filename with user's name if available
+                file_name = f"{name} Medical Report.pdf" if name and name.strip() else "Your Medical Report.pdf"
+                logging.info("File Name:",file_name)
+                            
+                # Upload the PDF with the personalized filename
+                media_id = upload_media_to_whatsapp(pdf_data, file_type="application/pdf", file_name="Medical Report.pdf") 
+                # Create a short text summary for the caption
+                caption = "Your medical report is ready."
+                
+                # Send the PDF document
+                document_data = get_document_message_input(wa_id, media_id, caption)
+                return send_message(document_data)
 
         elif message_type == "audio":
             logging.info("Audio message detected")
@@ -243,25 +324,40 @@ def process_whatsapp_message(body):
             audio_data = download_media(audio_url)
 
             translated_transcript = transcribe_audio(audio_data)
-            response = f"English transcript: {translated_transcript}"
+
+            # After generating the PDF from transcribed text
+            pdf_data = generate_pdf_from_text(translated_transcript)
+                    
+            # Create personalized filename with user's name if available
+            file_name = f"{name} Medical Report.pdf" if name and name.strip() else "Your Medical Report.pdf"
+                    
+            # Upload the PDF with the personalized filename
+            media_id = upload_media_to_whatsapp(pdf_data, file_type="application/pdf", file_name=file_name)
+            
+            # Upload the PDF to WhatsApp
+            
+            # Send the PDF document
+            document_data = get_document_message_input(wa_id, media_id, "Your audio message has been transcribed and translated")
+            return send_message(document_data)
         else:
             logging.info(f"Unsupported message type: {message_type}")
-            response = "I can only understand text or voice notes."
-
-        # Format and send the response
-        formatted_response = process_text_for_whatsapp(response)
-        data = get_text_message_input(wa_id, formatted_response)
-        send_result = send_message(data)
-
-        logging.info(f"Message sent. Result: {send_result}")
-        return send_result
+            response_data = get_text_message_input(wa_id, "I can only understand text or voice notes.")
+            return send_message(response_data)
 
     except Exception as e:
         error_msg = f"Error processing WhatsApp message: {str(e)}"
         logging.error(error_msg)
         logging.exception("Full exception details:")
+        
+        # Try to send error message to user if possible
+        try:
+            if 'wa_id' in locals():
+                error_data = get_text_message_input(wa_id, "Sorry, there was an error processing your request. Please try again later.")
+                send_message(error_data)
+        except:
+            logging.error("Could not send error message to user")
+            
         return jsonify({"status": "error", "message": error_msg}), 500
-
 
 
 def is_valid_whatsapp_message(body):

@@ -4,3 +4,4 @@ google
 google-genai
 aiohttp
 requests
+reportlab
