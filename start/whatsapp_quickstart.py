@@ -18,9 +18,6 @@ VERSION = os.getenv("VERSION")
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
 
-# --------------------------------------------------------------
-# Send a template WhatsApp message
-# --------------------------------------------------------------
 
 
 def send_whatsapp_message():
