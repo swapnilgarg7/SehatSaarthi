@@ -5,6 +5,7 @@ import requests
 import re
 from google import genai
 import os
+import mimetypes
 
 def log_http_response(response):
     logging.info(f"Status: {response.status_code}")
@@ -33,7 +34,11 @@ def translate_to_english(text):
             api_key=os.environ.get("GEMINI_API_KEY"),
         )
     
-        prompt = f"Translate the following text to English: '{text}' and only give the best translation, no other useless text"
+        semiprompt = f"Translate the following text to English: '{text}' and only give the best translation, no other useless text"
+        prompt = '''
+Translate the following text to English and convert it into a medical report. Format with bold section headers (**Section:**) and proper structure following standard hospital format. Include: Patient Details, Chief Complaint, History, Examination, Assessment, and Plan. Use simple formatting that works in WhatsApp (bold, bullet points).
+
+Text to translate: '''+text
         logging.info(f"Translation prompt created: {prompt}")
         
         response = client.models.generate_content(model = "gemini-2.0-flash",contents=prompt)
@@ -138,41 +143,67 @@ def download_media(url):
     return response.content
 
 
-def transcribe_audio(audio_data):
-    import google.generativeai as genai
-    
-    logging.info("Starting audio transcription and translation")
-    
-    # Configure the Gemini API
+def transcribe_audio(audio_data, mime_type=None):
+    """
+    Transcribes audio data (bytes) to text, then translates it to English using Gemini,
+    relying *only* on Gemini.  Handles raw bytes directly.
+
+    Args:
+        audio_data:  The audio data as bytes.
+        mime_type: (optional) The MIME type of the audio data. If not provided,
+                   the function will attempt to guess it from the audio data.
+                   It's VERY highly recommended to provide the mime_type for reliability.
+
+    Returns:
+        Translated text in English, or an error message.
+    """
     try:
-        logging.info("Configuring Gemini API")
-        genai.configure(api_key=current_app.config["GEMINI_API_KEY"])
-        logging.info("Gemini API configured successfully")
-        
-        assumed_transcription = "This is a placeholder for actual transcription"
-        logging.info(f"Placeholder transcription: {assumed_transcription}")
-        
-        # Now translate this transcription to English
-        logging.info("Creating Gemini model instance for audio transcript translation")
-        model = genai.GenerativeModel('gemini-pro')
-        
-        prompt = f"Translate the following text to English : '{assumed_transcription}' and only give the best translation, no other useless text"
-        logging.info(f"Audio translation prompt: {prompt}")
-        
-        logging.info("Sending audio transcript to Gemini API for translation")
-        response = model.generate_content(prompt)
-        logging.info("Received translation response from Gemini API")
-        
-        translated_transcript = response.text.strip()
-        logging.info(f"Translated transcript: {translated_transcript}")
-        
-        return translated_transcript
-    
+        # 1.  MIME Type Handling
+        if not mime_type:
+            # Attempt to guess MIME type if not provided.  This is unreliable!
+            try:
+              mime_type = mimetypes.guess_type(None, strict=False)[0]  # Pass None to guess from content, strict=False
+            except:
+              mime_type = None # handle the exception, this happens on systems where python can't guess
+            if not mime_type:
+                return "Error: Cannot determine MIME type from audio data. Please provide the 'mime_type' argument."
+            logging.warning(f"Guessed MIME type: {mime_type}.  It's recommended to provide this explicitly!")
+        logging.info(f"Using MIME type: {mime_type}")
+
+        # 2. Gemini Initialization
+
+        if not current_app.config.get("GEMINI_API_KEY") and not os.environ.get("GEMINI_API_KEY"):
+            return "Translation failed: Gemini API key is not configured."
+
+        gemini_api_key = current_app.config.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+
+        model = genai.GenerativeModel(model_name="gemini-1.5-pro-latest",
+            api_key=gemini_api_key
+        ) # or use "gemini-1.5-pro-latest"
+        # 3. Gemini Prompt and Request
+
+        prompt = "Transcribe the audio and then translate the transcription to English. Give only the final English translation."  # Direct instruction to transcribe and translate
+
+        contents = [
+            prompt,
+            {
+                "mime_type": mime_type,  # Set the correct MIME type for the audio
+                "data": audio_data  # Pass the bytes directly
+            }
+        ]
+
+        response = model.generate_content(
+            contents = contents,
+            stream = False  # For simplicity, disable streaming
+        )
+        logging.info(f"Gemini API response: {response.text}")
+
+        return response.text  # This *should* be the English translation
+
     except Exception as e:
-        error_msg = f"Error in audio transcription/translation: {str(e)}"
+        error_msg = f"Gemini error: {str(e)}"
         logging.error(error_msg)
-        logging.exception("Full exception details:")
-        return f"Sorry, I couldn't process the audio. Error: {e}"
+        return f"Sorry, I couldn't process your audio using Gemini. Error: {str(e)}"
 
 
 def process_whatsapp_message(body):
