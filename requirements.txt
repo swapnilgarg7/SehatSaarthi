@@ -1,5 +1,6 @@
 flask
 python-dotenv
-openai
+google
+google-genai
 aiohttp
 requests
