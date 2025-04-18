@@ -87,7 +87,7 @@ def translate_to_english(text):
     
         prompt = '''
 Translate the following text to English and convert it into a medical report. Format with bold section headers (**Section:**) and proper structure following standard hospital format. Include: Patient Details, Chief Complaint, History, Examination, Assessment, and Plan. Use simple formatting that works in WhatsApp (bold, bullet points).
-Dont include the translation in the response
+Dont include the translation in the response, also dont include the starter text in the prompt (like 'okay heres ur report' etc), directly start with the medical report
 Text to translate: '''+text
         logging.info(f"Translation prompt created: {prompt}")
         
@@ -373,7 +373,7 @@ def process_whatsapp_message(body):
             media_id = upload_media_to_whatsapp(pdf_data, file_type="application/pdf", file_name=file_name)
             
             # Send the PDF document
-            document_data = get_document_message_input(wa_id, media_id, "Your audio message has been transcribed and translated")
+            document_data = get_document_message_input(wa_id, media_id, "Here is your medical report !")
             return send_message(document_data)
         else:
             logging.info(f"Unsupported message type: {message_type}")
